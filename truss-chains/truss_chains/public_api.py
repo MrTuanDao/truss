@@ -67,7 +67,8 @@ def deploy_remotely(
 def run_local(
     secrets: Optional[Mapping[str, str]] = None,
     data_dir: Optional[Union[pathlib.Path, str]] = None,
+    chainlet_to_service: Optional[Mapping[str, definitions.ServiceDescriptor]] = None,
 ) -> ContextManager[None]:
     """Context manager for using in-process instantiations of Chainlet dependencies."""
     data_dir = pathlib.Path(data_dir) if data_dir else None
-    return framework.run_local(secrets, data_dir)
+    return framework.run_local(secrets, data_dir, chainlet_to_service)

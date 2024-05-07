@@ -522,16 +522,6 @@ def ensure_args_are_injected(cls, original_init: Callable, kwargs) -> None:
 # Local Deployment #####################################################################
 
 
-def _create_local_context(
-    chainlet_cls: Type[definitions.ABCChainlet],
-    secrets: Mapping[str, str],
-    data_dir: Optional[pathlib.Path],
-) -> definitions.DeploymentContext:
-    return definitions.DeploymentContext(
-        user_config=chainlet_cls.default_user_config, secrets=secrets, data_dir=data_dir
-    )
-
-
 def _create_modified_init_for_local(
     chainlet_descriptor: definitions.ChainletAPIDescriptor,
     cls_to_instance: MutableMapping[
@@ -539,6 +529,7 @@ def _create_modified_init_for_local(
     ],
     secrets: Mapping[str, str],
     data_dir: Optional[pathlib.Path],
+    chainlet_to_service: Mapping[str, definitions.ServiceDescriptor],
 ):
     """Replaces the default argument values with local Chainlet instantiations.
 
@@ -556,10 +547,12 @@ def _create_modified_init_for_local(
         logging.debug(f"Patched `__init__` of `{chainlet_descriptor.name}`.")
         kwargs_mod = dict(kwargs)
         if definitions.CONTEXT_ARG_NAME not in kwargs_mod:
-            context = _create_local_context(
-                chainlet_descriptor.chainlet_cls, secrets, data_dir
+            kwargs_mod[definitions.CONTEXT_ARG_NAME] = definitions.DeploymentContext(
+                user_config=chainlet_descriptor.chainlet_cls.default_user_config,
+                secrets=secrets,
+                data_dir=data_dir,
+                chainlet_to_service=chainlet_to_service,
             )
-            kwargs_mod[definitions.CONTEXT_ARG_NAME] = context
         else:
             logging.debug(
                 f"Use explicitly given context for `{self.__class__.__name__}`."
@@ -597,6 +590,7 @@ def _create_modified_init_for_local(
 def run_local(
     secrets: Optional[Mapping[str, str]] = None,
     data_dir: Optional[pathlib.Path] = None,
+    chainlet_to_service: Optional[Mapping[str, definitions.ServiceDescriptor]] = None,
 ) -> Any:
     """Context to run Chainlets with dependency injection from local instances."""
     # TODO: support retries in local mode.
@@ -610,7 +604,11 @@ def run_local(
             chainlet_descriptor.chainlet_cls
         ] = chainlet_descriptor.chainlet_cls.__init__
         init_for_local = _create_modified_init_for_local(
-            chainlet_descriptor, type_to_instance, secrets or {}, data_dir
+            chainlet_descriptor,
+            type_to_instance,
+            secrets or {},
+            data_dir,
+            chainlet_to_service or {},
         )
         chainlet_descriptor.chainlet_cls.__init__ = init_for_local  # type: ignore[method-assign]
         chainlet_descriptor.chainlet_cls._init_is_patched = True

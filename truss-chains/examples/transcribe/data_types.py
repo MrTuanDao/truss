@@ -1,3 +1,4 @@
+import datetime
 import enum
 from typing import Literal, Optional
 
@@ -7,7 +8,7 @@ from truss_chains import utils
 
 class TranscribeParams(pydantic.BaseModel):
     wav_sampling_rate_hz: Literal[16000] = pydantic.Field(
-        ...,
+        16000,
         description=" This is a constant of Whisper and should not be changed.",
     )
     macro_chunk_size_sec: int = pydantic.Field(
@@ -26,11 +27,6 @@ class TranscribeParams(pydantic.BaseModel):
         1600,
         description="Number of samples to determine width of box smoothing "
         "filter. With sampling of 16 kHz, 1600 samples is 1/10 second.",
-    )
-    result_webhook_url: str = pydantic.Field(
-        ...,
-        description="Webhook that accepts requests with payload of form"
-        "{'transcription': <TranscriptionExternal.json>}.",
     )
 
 
@@ -90,7 +86,7 @@ class WavInfo(pydantic.BaseModel):
 
 
 class JobStatus(utils.StrEnum):
-    # `Self` is needed to make mypy happy - it seems like a FP on their side though.
+    QUEUED = enum.auto()
     SUCCEEDED = enum.auto()
     PERMAFAILED = enum.auto()
 
@@ -99,15 +95,22 @@ class JobDescriptor(pydantic.BaseModel):
     media_url: str
     media_id: int
     job_uuid: str
+    status: Optional[JobStatus] = None
 
 
-class WorkletInput(pydantic.BaseModel):
+class BatchInput(pydantic.BaseModel):
     class Config:
         allow_population_by_field_name = True
 
     media_for_transcription: list[JobDescriptor] = pydantic.Field(
         ..., alias="media_for_transciption"
     )  # This typo is for backwards compatibility.
+
+
+class BatchOutput(pydantic.BaseModel):
+    success: bool
+    jobs: list[JobDescriptor]
+    error_message: Optional[str] = None
 
 
 class TranscriptionSegmentExternal(pydantic.BaseModel):
@@ -130,3 +133,16 @@ class TranscriptionExternal(pydantic.BaseModel):
     # TODO: this is not a great name.
     text: Optional[list[TranscriptionSegmentExternal]] = None
     failure_reason: Optional[str] = None
+
+
+class AsyncTranscriptionExternal(pydantic.BaseModel):
+    class Config:
+        protected_namespaces = ()
+
+    request_id: str
+    model_id: str
+    deployment_id: str
+    type: str
+    time: datetime.datetime
+    data: TranscriptionExternal
+    errors: list[dict]
