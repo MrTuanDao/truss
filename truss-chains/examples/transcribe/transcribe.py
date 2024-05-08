@@ -17,7 +17,7 @@ _IMAGE = docker_image = chains.DockerImage(
 # Whisper is deployed as a normal truss model from examples/library.
 _WHISPER_URL = "https://model-5woz91z3.api.baseten.co/production/predict"
 # See `InternalWebhook`-chainlet below.
-_INTERNAL_WEBHOOK_URL = "https://model-4q99pkxq.api.baseten.co/development/predict"
+_INTERNAL_WEBHOOK_URL = "https://model-yqvpp1rq.api.baseten.co/development/predict"
 
 
 class DeployedWhisper(chains.StubBase):
@@ -39,7 +39,7 @@ class MacroChunkWorker(chains.ChainletBase):
     """Downloads and transcribes larger chunks of the total file (~300s)."""
 
     remote_config = chains.RemoteConfig(
-        docker_image=_IMAGE, compute=chains.Compute(cpu_count=16, memory="32G")
+        docker_image=_IMAGE, compute=chains.Compute(cpu_count=8, memory="16G")
     )
     _whisper: DeployedWhisper
 
@@ -96,7 +96,7 @@ class Transcribe(chains.ChainletBase):
 
     remote_config = chains.RemoteConfig(
         docker_image=_IMAGE,
-        compute=chains.Compute(cpu_count=16, memory="32G"),
+        compute=chains.Compute(cpu_count=8, memory="16G"),
         assets=chains.Assets(secret_keys=["dummy_webhook_key"]),
     )
     _video_worker: MacroChunkWorker
@@ -188,10 +188,10 @@ class InternalWebhook(chains.ChainletBase):
     """Receives results for debugging."""
 
     remote_config = chains.RemoteConfig(
-        docker_image=_IMAGE, compute=chains.Compute(cpu_count=16, memory="32G")
+        docker_image=_IMAGE, compute=chains.Compute(cpu_count=8, memory="16G")
     )
 
-    async def run(self, transcription: data_types.AsyncTranscriptionExternal) -> None:
+    async def run(self, transcription: data_types.AsyncTranscriptionResult) -> None:
         logging.info(transcription.json(indent=4))
         # This would call external webhook next.
         # result_json = transcription.json()
@@ -218,7 +218,7 @@ class BatchTranscribe(chains.ChainletBase):
     """Accepts a request with multiple transcription jobs and starts the sub-jobs."""
 
     remote_config = chains.RemoteConfig(
-        docker_image=_IMAGE, compute=chains.Compute(cpu_count=16, memory="32G")
+        docker_image=_IMAGE, compute=chains.Compute(cpu_count=8, memory="16G")
     )
 
     def __init__(
@@ -240,24 +240,19 @@ class BatchTranscribe(chains.ChainletBase):
     def _enqueue(
         self, job: data_types.JobDescriptor, params: data_types.TranscribeParams
     ):
-        # TODO: use pydantic model.
-        json_payload = {
-            "model_input": {
-                "media_url": job.media_url,
-                "params": params.dict(),
-                "job": job.dict(),
-            },
-            "webhook_endpoint": _INTERNAL_WEBHOOK_URL,
-            "inference_retry_config": {
-                "max_attempts": 3,
-                # "initial_delay_ms": 1000,
-                # "max_delay_ms": 5000,
-            },
-        }
-        return self._async_transcribe.predict_async(json_payload)
+        request = data_types.AsyncTranscriptionRequest(
+            model_input=data_types.TranscribeInput(
+                media_url=job.media_url,
+                params=params,
+                job_descr=job,
+            ),
+            webhook_endpoint=_INTERNAL_WEBHOOK_URL,
+            inference_retry_config=data_types.AsyncTranscriptionRequest.RetryConfig(),
+        )
+        return self._async_transcribe.predict_async(request.dict())
 
     async def run(self, batch_input: data_types.BatchInput) -> data_types.BatchOutput:
-        logging.info(batch_input)
+        logging.info(batch_input.json())
         logging.info(f"Got `{len(batch_input.media_for_transcription)}` tasks.")
         params = data_types.TranscribeParams()
         tasks = []

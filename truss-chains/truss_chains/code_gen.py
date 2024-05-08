@@ -519,6 +519,7 @@ def _make_truss_config(
     # Compute.
     compute = chains_config.get_compute_spec()
     config.resources.cpu = str(compute.cpu_count)
+    config.resources.memory = str(compute.memory)
     config.resources.accelerator = compute.accelerator
     config.resources.use_gpu = bool(compute.accelerator.count)
     # TODO: expose this setting directly.

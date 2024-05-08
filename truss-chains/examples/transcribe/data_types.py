@@ -135,7 +135,24 @@ class TranscriptionExternal(pydantic.BaseModel):
     failure_reason: Optional[str] = None
 
 
-class AsyncTranscriptionExternal(pydantic.BaseModel):
+class TranscribeInput(pydantic.BaseModel):
+    media_url: str
+    params: TranscribeParams
+    job_descr: JobDescriptor
+
+
+class AsyncTranscriptionRequest(pydantic.BaseModel):
+    class RetryConfig(pydantic.BaseModel):
+        max_attempts: int = 3
+        initial_delay_ms: int = 0
+        max_delay_ms: int = 5000
+
+    model_input: TranscribeInput
+    webhook_endpoint: str
+    inference_retry_config: RetryConfig
+
+
+class AsyncTranscriptionResult(pydantic.BaseModel):
     class Config:
         protected_namespaces = ()
 

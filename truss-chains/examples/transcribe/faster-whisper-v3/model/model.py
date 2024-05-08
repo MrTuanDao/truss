@@ -49,10 +49,7 @@ class Model:
         with NamedTemporaryFile() as fp:
             fp.write(audio_data)
             segments, info = self._model.transcribe(
-                fp.name,
-                temperature=0,
-                best_of=5,
-                beam_size=5,
+                fp.name, temperature=0, best_of=5, beam_size=5, word_timestamps=True
             )
 
             for seg in segments:
