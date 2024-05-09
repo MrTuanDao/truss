@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import time
 
@@ -130,11 +131,11 @@ class Transcribe(chains.ChainletBase):
 
     async def run(
         self,
-        media_url: str,
-        params: data_types.TranscribeParams,
         job_descr: data_types.JobDescriptor,
+        params: data_types.TranscribeParams,
     ) -> data_types.TranscriptionExternal:
         t0 = time.time()
+        media_url = job_descr.media_url
         await self._assert_media_supports_range_downloads(media_url)
         duration_secs = await helpers.query_video_length_secs(media_url)
         video_chunks = helpers.generate_time_chunks(
@@ -178,6 +179,16 @@ class Transcribe(chains.ChainletBase):
                 for seg in part.segments
             ],
         )
+        # When `Transcribe` is called with `async_predict` the async framework will
+        # invoke the webhook, but it expects that the webhook does not need
+        # authentication (instead will validate via payload signature).
+        # We can't run a chainlet (i.e. truss model) without requiring authentication
+        # and we don't want to stand up and manage another service - so we basically
+        # ignore async's webhook integration and "manually" call a webhook from here
+        # where we can explicitly add the authentication.
+        # This is a bit suboptimal, because it does not wrap around catching all errors
+        # (there could be errors raised from the generated truss model if the input
+        # payload is malformed).
         return external_result
 
 
@@ -242,33 +253,33 @@ class BatchTranscribe(chains.ChainletBase):
     ):
         request = data_types.AsyncTranscriptionRequest(
             model_input=data_types.TranscribeInput(
-                media_url=job.media_url,
-                params=params,
                 job_descr=job,
+                params=params,
             ),
             webhook_endpoint=_INTERNAL_WEBHOOK_URL,
             inference_retry_config=data_types.AsyncTranscriptionRequest.RetryConfig(),
         )
         return self._async_transcribe.predict_async(request.dict())
 
-    async def run(self, batch_input: data_types.BatchInput) -> data_types.BatchOutput:
-        logging.info(batch_input.json())
-        logging.info(f"Got `{len(batch_input.media_for_transcription)}` tasks.")
+    async def run(self, media_for_transciption: str) -> data_types.BatchOutput:
+        # This typo `media_for_transciption` is for backwards compatibility.
+        # Also this would ideally be `list[JobDescriptor]` instead of string...
+        media_for_transcription = json.loads(media_for_transciption)
+        jobs = [data_types.JobDescriptor.parse_obj(x) for x in media_for_transcription]
+        logging.info(f"Got `{len(jobs)}` tasks.")
         params = data_types.TranscribeParams()
-        tasks = []
-        for job in batch_input.media_for_transcription:
-            tasks.append(asyncio.ensure_future(self._enqueue(job, params)))
+        tasks = [asyncio.ensure_future(self._enqueue(job, params)) for job in jobs]
 
-        jobs = []
+        queued_jobs = []
         for i, val in enumerate(await asyncio.gather(*tasks, return_exceptions=True)):
-            job = batch_input.media_for_transcription[i]
+            job = jobs[i]
             if isinstance(val, Exception):
                 logging.exception(f"Could not enqueue `{job.json()}`. {val}")
                 job = job.copy(update={"status": data_types.JobStatus.PERMAFAILED})
             else:
-                logging.info(val)
+                logging.info(f"Async call response: {val}")
                 job = job.copy(update={"status": data_types.JobStatus.QUEUED})
 
-            jobs.append(job)
-        output = data_types.BatchOutput(success=True, jobs=jobs)
+            queued_jobs.append(job)
+        output = data_types.BatchOutput(success=True, jobs=queued_jobs)
         return output

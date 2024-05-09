@@ -98,15 +98,6 @@ class JobDescriptor(pydantic.BaseModel):
     status: Optional[JobStatus] = None
 
 
-class BatchInput(pydantic.BaseModel):
-    class Config:
-        allow_population_by_field_name = True
-
-    media_for_transcription: list[JobDescriptor] = pydantic.Field(
-        ..., alias="media_for_transciption"
-    )  # This typo is for backwards compatibility.
-
-
 class BatchOutput(pydantic.BaseModel):
     success: bool
     jobs: list[JobDescriptor]
@@ -136,9 +127,8 @@ class TranscriptionExternal(pydantic.BaseModel):
 
 
 class TranscribeInput(pydantic.BaseModel):
-    media_url: str
-    params: TranscribeParams
     job_descr: JobDescriptor
+    params: TranscribeParams
 
 
 class AsyncTranscriptionRequest(pydantic.BaseModel):
