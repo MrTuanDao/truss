@@ -1,4 +1,3 @@
-import datetime
 import enum
 from typing import Literal, Optional
 
@@ -86,25 +85,36 @@ class WavInfo(pydantic.BaseModel):
 
 
 class JobStatus(utils.StrEnum):
+    # Do not change, taken from existing App.
     QUEUED = enum.auto()
     SUCCEEDED = enum.auto()
     PERMAFAILED = enum.auto()
+    DEBUG_RESULT = enum.auto()
 
 
 class JobDescriptor(pydantic.BaseModel):
+    # Do not change, taken from existing App.
     media_url: str
     media_id: int
     job_uuid: str
     status: Optional[JobStatus] = None
 
 
+class WorkletInput(pydantic.BaseModel):
+    # This typo `media_for_transciption` is for backwards compatibility.
+    # Also this would ideally be `list[JobDescriptor]` instead of string...
+    media_for_transciption: str
+
+
 class BatchOutput(pydantic.BaseModel):
+    # Do not change, taken from existing App.
     success: bool
     jobs: list[JobDescriptor]
     error_message: Optional[str] = None
 
 
 class TranscriptionSegmentExternal(pydantic.BaseModel):
+    # Do not change, taken from existing App.
     start: float = pydantic.Field(..., description="In seconds.")
     end: float = pydantic.Field(..., description="In seconds.")
     text: str
@@ -117,6 +127,7 @@ class TranscriptionSegmentExternal(pydantic.BaseModel):
 
 
 class TranscriptionExternal(pydantic.BaseModel):
+    # Do not change, taken from existing App.
     media_url: str
     media_id: int  # Seems to be just 0 or 1.
     job_uuid: str
@@ -125,31 +136,31 @@ class TranscriptionExternal(pydantic.BaseModel):
     text: Optional[list[TranscriptionSegmentExternal]] = None
     failure_reason: Optional[str] = None
 
+    @classmethod
+    def from_job_descr(cls, job_descr: JobDescriptor, status: JobStatus):
+        return TranscriptionExternal(
+            media_url=job_descr.media_url,
+            media_id=job_descr.media_id,
+            job_uuid=job_descr.job_uuid,
+            status=status,
+        )
+
 
 class TranscribeInput(pydantic.BaseModel):
+    # Do not change, taken from existing App.
     job_descr: JobDescriptor
     params: TranscribeParams
 
 
-class AsyncTranscriptionRequest(pydantic.BaseModel):
-    class RetryConfig(pydantic.BaseModel):
-        max_attempts: int = 3
-        initial_delay_ms: int = 0
-        max_delay_ms: int = 5000
+class RetryConfig(pydantic.BaseModel):
+    # Do not change, matches `async_predict` data-models..
+    max_attempts: int = 1
+    initial_delay_ms: int = 0
+    max_delay_ms: int = 5000
 
+
+class AsyncTranscriptionRequest(pydantic.BaseModel):
+    # Do not change, matches `async_predict` data-models.
     model_input: TranscribeInput
     webhook_endpoint: str
     inference_retry_config: RetryConfig
-
-
-class AsyncTranscriptionResult(pydantic.BaseModel):
-    class Config:
-        protected_namespaces = ()
-
-    request_id: str
-    model_id: str
-    deployment_id: str
-    type: str
-    time: datetime.datetime
-    data: TranscriptionExternal
-    errors: list[dict]

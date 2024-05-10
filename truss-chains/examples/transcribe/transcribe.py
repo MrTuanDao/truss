@@ -8,6 +8,7 @@ import data_types
 import helpers
 import httpx
 import numpy as np
+import tenacity
 import truss_chains as chains
 from truss_chains import stub
 
@@ -18,7 +19,7 @@ _IMAGE = docker_image = chains.DockerImage(
 # Whisper is deployed as a normal truss model from examples/library.
 _WHISPER_URL = "https://model-5woz91z3.api.baseten.co/production/predict"
 # See `InternalWebhook`-chainlet below.
-_INTERNAL_WEBHOOK_URL = "https://model-yqvpp1rq.api.baseten.co/development/predict"
+_NO_OP_SHADOW = True
 
 
 class DeployedWhisper(chains.StubBase):
@@ -92,6 +93,41 @@ class MacroChunkWorker(chains.ChainletBase):
         )
 
 
+class InternalWebhook(chains.ChainletBase):
+    """Receives results for debugging."""
+
+    remote_config = chains.RemoteConfig(
+        docker_image=_IMAGE, compute=chains.Compute(cpu_count=1, memory="2G")
+    )
+    _async_http: httpx.AsyncClient
+
+    def __init__(self, context: chains.DeploymentContext = chains.provide_context()):
+        super().__init__(context)
+        self._async_http = httpx.AsyncClient()
+
+    async def run(self, result: data_types.TranscriptionExternal) -> None:
+        if result.failure_reason:
+            logging.error(result.failure_reason)
+            logging.error(result.json())
+        else:
+            logging.info(result.json())
+        # This would call external webhook next.
+        # payload_str = json.dumps(result)
+        # payload_signature = hmac.new(
+        #     self._context.get_secret("patreon_webhook_key").encode("utf-8"),
+        #     payload_str.encode("utf-8"),
+        #     hashlib.sha1,
+        # ).hexdigest()
+        # headers = {"X-Baseten-Signature": payload_signature}
+        # # Extra key `transcription` is needed for test webhook.
+        # resp = await self._async_http.post(
+        #   webhook_url, data=payload_str, headers=headers)
+        # if resp.status_code == 200:
+        #     return
+        # else:
+        #     raise Exception(f"Could not call webhook: {resp.content.decode()}.")
+
+
 class Transcribe(chains.ChainletBase):
     """Transcribes one file end-to-end and sends results to webhook."""
 
@@ -107,9 +143,11 @@ class Transcribe(chains.ChainletBase):
         self,
         context: chains.DeploymentContext = chains.provide_context(),
         video_worker: MacroChunkWorker = chains.provide(MacroChunkWorker, retries=3),
+        internal_webhook: InternalWebhook = chains.provide(InternalWebhook, retries=2),
     ) -> None:
         super().__init__(context)
         self._video_worker = video_worker
+        self._internal_webhook = internal_webhook
         self._async_http = httpx.AsyncClient()
         logging.getLogger("httpx").setLevel(logging.WARNING)
 
@@ -129,7 +167,7 @@ class Transcribe(chains.ChainletBase):
         if not ok:
             raise NotImplementedError(f"Range downloads unsupported for `{media_url}`.")
 
-    async def run(
+    async def _transcribe(
         self,
         job_descr: data_types.JobDescriptor,
         params: data_types.TranscribeParams,
@@ -138,12 +176,18 @@ class Transcribe(chains.ChainletBase):
         media_url = job_descr.media_url
         await self._assert_media_supports_range_downloads(media_url)
         duration_secs = await helpers.query_video_length_secs(media_url)
+        logging.info(f"Transcribe request for `{duration_secs:.1f}` seconds.")
+        if _NO_OP_SHADOW:
+            return data_types.TranscriptionExternal.from_job_descr(
+                job_descr, status=data_types.JobStatus.DEBUG_RESULT  # type: ignore[arg-type]
+            )
+
         video_chunks = helpers.generate_time_chunks(
             int(np.ceil(duration_secs)), params.macro_chunk_size_sec
         )
         tasks = []
         for i, chunk_limits in enumerate(video_chunks):
-            logging.info(f"Starting macro-chunk [{i+1:03}/{len(video_chunks):03}].")
+            logging.info(f"Starting macro-chunk [{i + 1:03}/{len(video_chunks):03}].")
             tasks.append(
                 asyncio.ensure_future(
                     self._video_worker.run(media_url, params, i, *chunk_limits)
@@ -153,33 +197,37 @@ class Transcribe(chains.ChainletBase):
         results: list[data_types.TranscribeOutput] = await asyncio.gather(*tasks)
         t1 = time.time()
         processing_time = t1 - t0
-        result = data_types.TranscribeOutput(
-            segments=[],
-            input_duration_sec=duration_secs,
-            processing_duration_sec=processing_time,
-            speedup=duration_secs / processing_time,
+        logging.info(
+            data_types.TranscribeOutput(
+                segments=[],
+                input_duration_sec=duration_secs,
+                processing_duration_sec=processing_time,
+                speedup=duration_secs / processing_time,
+            )
         )
-        logging.info(result)
+        # Ignored type issue seems to be a mypy bug.
+        result = data_types.TranscriptionExternal.from_job_descr(
+            job_descr, status=data_types.JobStatus.SUCCEEDED  # type: ignore[arg-type]
+        )
+        result.text = [
+            data_types.TranscriptionSegmentExternal(
+                start=seg.segment_info.start_time_sec,
+                end=seg.segment_info.end_time_sec,
+                text=seg.transcription.text,
+                language=seg.transcription.language,
+                bcp47_key=seg.transcription.bcp47_key,
+            )
+            for part in results
+            for seg in part.segments
+        ]
+        return result
 
-        # Type issue seems to be a mypy bug.
-        external_result = data_types.TranscriptionExternal(
-            media_url=job_descr.media_url,
-            media_id=job_descr.media_id,
-            job_uuid=job_descr.job_uuid,
-            status=data_types.JobStatus.SUCCEEDED,  # type: ignore[arg-type]
-            text=[
-                data_types.TranscriptionSegmentExternal(
-                    start=seg.segment_info.start_time_sec,
-                    end=seg.segment_info.end_time_sec,
-                    text=seg.transcription.text,
-                    language=seg.transcription.language,
-                    bcp47_key=seg.transcription.bcp47_key,
-                )
-                for part in results
-                for seg in part.segments
-            ],
-        )
-        # When `Transcribe` is called with `async_predict` the async framework will
+    async def run(
+        self,
+        job_descr: data_types.JobDescriptor,
+        params: data_types.TranscribeParams,
+    ) -> data_types.TranscriptionExternal:
+        # When `Transcribe.run` is called with `async_predict` the async framework will
         # invoke the webhook, but it expects that the webhook does not need
         # authentication (instead will validate via payload signature).
         # We can't run a chainlet (i.e. truss model) without requiring authentication
@@ -189,43 +237,39 @@ class Transcribe(chains.ChainletBase):
         # This is a bit suboptimal, because it does not wrap around catching all errors
         # (there could be errors raised from the generated truss model if the input
         # payload is malformed).
-        return external_result
+        try:
+            retrying = tenacity.AsyncRetrying(
+                stop=tenacity.stop_after_attempt(3),
+                retry=tenacity.retry_if_exception_type(Exception),
+                reraise=True,
+            )
+            async for attempt in retrying:
+                with attempt:
+                    if (num := attempt.retry_state.attempt_number) > 1:
+                        logging.info(
+                            f"Retrying `{self._transcribe}`, " f"attempt {num}"
+                        )
+                    result = await self._transcribe(job_descr, params)
+
+        except Exception as e:
+            logging.exception("Transcription failed, still invoking webhook.")
+            error_msg = f"{type(e)}: {str(e)}"
+            # Ignored type issue seems to be a mypy bug.
+            failure_result = data_types.TranscriptionExternal.from_job_descr(
+                job_descr, status=data_types.JobStatus.PERMAFAILED  # type: ignore[arg-type]
+            )
+            failure_result.failure_reason = error_msg
+            await self._internal_webhook.run(result=failure_result)
+            raise  # Make this considered failed to caller / async processor.
+
+        await self._internal_webhook.run(result=result)
+        return result
 
 
 # Shims for external APIs ##############################################################
 
 
-class InternalWebhook(chains.ChainletBase):
-    """Receives results for debugging."""
-
-    remote_config = chains.RemoteConfig(
-        docker_image=_IMAGE, compute=chains.Compute(cpu_count=8, memory="16G")
-    )
-
-    async def run(self, transcription: data_types.AsyncTranscriptionResult) -> None:
-        logging.info(transcription.json(indent=4))
-        # This would call external webhook next.
-        # result_json = transcription.json()
-        # payload_signature = hmac.new(
-        #     self._context.secrets["dummy_webhook_key"].encode("utf-8"),
-        #     result_json.encode("utf-8"),
-        #     hashlib.sha1,
-        # ).hexdigest()
-        # headers = {
-        #     "X-Baseten-Signature": payload_signature,
-        #     "Authorization": f"Api-Key {self._context.get_baseten_api_key()}",
-        # }
-        # # Extra key `transcription` is needed for test webhook.
-        # resp = await self._async_http.post(
-        #     webhook_url, json={"transcription": result.dict()}, headers=headers
-        # )
-        # if resp.status_code == 200:
-        #     return
-        # else:
-        #     raise Exception(f"Could not call results webhook: {resp.content.decode()}.")
-
-
-class BatchTranscribe(chains.ChainletBase):
+class EnqueueBatch(chains.ChainletBase):
     """Accepts a request with multiple transcription jobs and starts the sub-jobs."""
 
     remote_config = chains.RemoteConfig(
@@ -236,40 +280,47 @@ class BatchTranscribe(chains.ChainletBase):
         self,
         context: chains.DeploymentContext = chains.provide_context(),
         transcribe: Transcribe = chains.provide(Transcribe),
-        internal_webhook: InternalWebhook = chains.provide(InternalWebhook),
+        internal_webhook: InternalWebhook = chains.provide(InternalWebhook, retries=2),
     ):
         super().__init__(context)
+        logging.info(
+            f"Replacing {transcribe.__class__.__name__} with `async_predict` version."
+        )
         transcribe_service = context.get_service_descriptor(Transcribe.__name__)
         predict_url = transcribe_service.predict_url.replace("predict", "async_predict")
         async_transcribe = transcribe_service.copy(update={"predict_url": predict_url})
-
         self._async_transcribe = stub.BasetenSession(
             async_transcribe, context.get_baseten_api_key()
         )
-        del transcribe, internal_webhook
+        self._internal_webhook_url = context.get_service_descriptor(
+            internal_webhook.__class__.__name__
+        ).predict_url
 
     def _enqueue(
         self, job: data_types.JobDescriptor, params: data_types.TranscribeParams
     ):
+        # While we can't use the async framework's webhooks, we have to do the retry
+        # logic manually inside `Transcribe`, not use async's retry.
+        # The internal webhook endpoint will return 401 because it requires
+        # a baseten API key for authentication.
         request = data_types.AsyncTranscriptionRequest(
             model_input=data_types.TranscribeInput(
                 job_descr=job,
                 params=params,
             ),
-            webhook_endpoint=_INTERNAL_WEBHOOK_URL,
-            inference_retry_config=data_types.AsyncTranscriptionRequest.RetryConfig(),
+            webhook_endpoint=self._internal_webhook_url,
+            inference_retry_config=data_types.RetryConfig(max_attempts=1),
         )
         return self._async_transcribe.predict_async(request.dict())
 
-    async def run(self, media_for_transciption: str) -> data_types.BatchOutput:
-        # This typo `media_for_transciption` is for backwards compatibility.
-        # Also this would ideally be `list[JobDescriptor]` instead of string...
-        media_for_transcription = json.loads(media_for_transciption)
+    async def run(
+        self, worklet_input: data_types.WorkletInput
+    ) -> data_types.BatchOutput:
+        media_for_transcription = json.loads(worklet_input.media_for_transciption)
         jobs = [data_types.JobDescriptor.parse_obj(x) for x in media_for_transcription]
         logging.info(f"Got `{len(jobs)}` tasks.")
         params = data_types.TranscribeParams()
         tasks = [asyncio.ensure_future(self._enqueue(job, params)) for job in jobs]
-
         queued_jobs = []
         for i, val in enumerate(await asyncio.gather(*tasks, return_exceptions=True)):
             job = jobs[i]
