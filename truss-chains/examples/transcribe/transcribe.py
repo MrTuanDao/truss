@@ -1,4 +1,5 @@
 import asyncio
+import datetime
 import json
 import logging
 import time
@@ -10,16 +11,19 @@ import httpx
 import numpy as np
 import tenacity
 import truss_chains as chains
+from google.cloud import bigquery
+from google.oauth2 import service_account
 from truss_chains import stub
 
 _IMAGE = docker_image = chains.DockerImage(
-    apt_requirements=["ffmpeg"], pip_requirements=["pandas", "bcp47"]
+    apt_requirements=["ffmpeg"],
+    pip_requirements=["pandas", "bcp47", "google-auth", "google-cloud-bigquery"],
 )
 
 # Whisper is deployed as a normal truss model from examples/library.
 _WHISPER_URL = "https://model-5woz91z3.api.baseten.co/production/predict"
 # See `InternalWebhook`-chainlet below.
-_NO_OP_SHADOW = True
+_NO_OP_SHADOW = False
 
 
 class DeployedWhisper(chains.StubBase):
@@ -97,24 +101,42 @@ class InternalWebhook(chains.ChainletBase):
     """Receives results for debugging."""
 
     remote_config = chains.RemoteConfig(
-        docker_image=_IMAGE, compute=chains.Compute(cpu_count=1, memory="2G")
+        docker_image=_IMAGE,
+        compute=chains.Compute(cpu_count=1, memory="2G"),
+        assets=chains.Assets(secret_keys=["big_query_service_account"]),
     )
     _async_http: httpx.AsyncClient
 
     def __init__(self, context: chains.DeploymentContext = chains.provide_context()):
         super().__init__(context)
+        key_dict = json.loads(context.secrets["big_query_service_account"])
+        credentials = service_account.Credentials.from_service_account_info(key_dict)
         self._async_http = httpx.AsyncClient()
+        self._bigquery_client = bigquery.Client(
+            credentials=credentials, project=credentials.project_id
+        )
+        self._table_id = "staging-workload-plane-1.Transcription_DBG.Segments"
 
     async def run(self, result: data_types.TranscriptionExternal) -> None:
+        row_data = {
+            "timestamp": datetime.datetime.utcnow().isoformat("T") + "Z",
+            "job_uuid": result.job_uuid,
+            "result_json": result.json(),
+            "error_msg": result.failure_reason,
+        }
         if result.failure_reason:
             logging.error(result.failure_reason)
-            logging.error(result.json())
+
+        errors = self._bigquery_client.insert_rows_json(self._table_id, [row_data])
+        if not errors:
+            logging.info("Result uploaded to bigquery.")
         else:
-            logging.info(result.json())
+            logging.error(f"Result upload to bigquery failed: {errors}.")
+
         # This would call external webhook next.
         # payload_str = json.dumps(result)
         # payload_signature = hmac.new(
-        #     self._context.get_secret("patreon_webhook_key").encode("utf-8"),
+        #     self._context.get_secret("***_webhook_key").encode("utf-8"),
         #     payload_str.encode("utf-8"),
         #     hashlib.sha1,
         # ).hexdigest()

@@ -211,7 +211,8 @@ class DeploymentContext(generics.GenericModel, Generic[UserConfigT]):
         extra = "forbid"
 
     data_dir: Optional[pathlib.Path] = None
-    user_config: UserConfigT = pydantic.Field(default=None)
+    # Mypy FP: UserConfigT can be optional.
+    user_config: UserConfigT = pydantic.Field(default=None)  # type: ignore[assignment]
     chainlet_to_service: Mapping[str, ServiceDescriptor] = {}
     # secrets: Optional[secrets_resolver.Secrets] = None
     # TODO: above type results in `truss.server.shared.secrets_resolver.Secrets`
@@ -249,7 +250,8 @@ class DeploymentContext(generics.GenericModel, Generic[UserConfigT]):
 class TrussMetadata(generics.GenericModel, Generic[UserConfigT]):
     """Plugin for the truss config (in config["model_metadata"]["chains_metadata"])."""
 
-    user_config: UserConfigT = pydantic.Field(default=None)
+    # Mypy FP: UserConfigT can be optional.
+    user_config: UserConfigT = pydantic.Field(default=None)  # type: ignore[assignment]
     chainlet_to_service: Mapping[str, ServiceDescriptor] = {}
 
 
